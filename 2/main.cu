@@ -1,5 +1,4 @@
-#include <assert.h>
-#include <stdio.h>
+#include "iohelper.h"
 
 #define NAMELEN 255
 
@@ -10,14 +9,11 @@
 		exit(0);			\
 	}						\
 } while(0)
-
-
-
-
+      
+ 
 texture<uchar4, 2, cudaReadModeElementType> tex;
 
-
-__global__ void kernel(uchar4 *dev_data, int w, int h, int r, float *dev_a, bool isColumns){
+__global__ void kernel(uchar4 *dev_data, int weight, int hieght, int radius, float *dev_a, bool isColumns){
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
 	int idy = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -28,13 +24,13 @@ __global__ void kernel(uchar4 *dev_data, int w, int h, int r, float *dev_a, bool
 	uchar4 pixel;
 	float red, green, blue;
 
-	for(int x = idx; x < w; x += offsetx){
-		for(int y = idy; y < h; y += offsety){
+	for(int x = idx; x < weight; x += offsetx){
+		for(int y = idy; y < hieght; y += offsety){
 			red = 0.0;
 			green = 0.0;
 			blue = 0.0;
 
-			for(int i = -r; i <=r; i++){
+			for(int i = -radius; i <=radius; i++){
 
 				if (isColumns) {
 				pixel = tex2D(tex, x + i, y);
@@ -43,15 +39,16 @@ __global__ void kernel(uchar4 *dev_data, int w, int h, int r, float *dev_a, bool
 				pixel = tex2D(tex, x, y + i);
 				}
 
-				red += dev_a[r + i] * pixel.x;
-				green += dev_a[r + i] * pixel.y;
-				blue += dev_a[r + i] * pixel.z;
+				red += dev_a[radius + i] * pixel.x;
+				green += dev_a[radius + i] * pixel.y;
+				blue += dev_a[radius + i] * pixel.z;
 			}
 
-			dev_data[y * w + x] = make_uchar4(red, green, blue, 0.0);
+			dev_data[y * weight + x] = make_uchar4(red, green, blue, 0.0);
 		}
 	}
 }
+  
 
 class CUGaussianBlur {
 public:
@@ -62,24 +59,29 @@ public:
 	uchar4 *dev_data;
 	cudaChannelFormatDesc ch;
 
-	int w;
-	int h;
+	int weight;
+	int hieght;
+	int radius;
 
-	CUGaussianBlur(int r, int _w, int _h, uchar4 *_data)  {
+	CUGaussianBlur(IOHelper<uchar4>  *reader) 
+	{
 
-		w = _w;
-		h = _h;
-		data = _data;
+		weight = (*reader).GetWeight();
+		hieght = (*reader).GetHeight();
+		radius = (*reader).GetRadius();
 
-		
-		int n = 2 * r + 1;
+
+		data = (uchar4 *)malloc(sizeof(*data)  * weight * hieght);
+		 (*reader).ReadData(data);
+ 
+		int n = 2 * radius + 1;
 		float sum = 0.0;
 
-		float a[n];
+		float a[n]; 
 
-		for(int i = -r; i <= r; i++) {
-			a[i + r] = exp(-1.0 * (i * i) / (2 * r * r));
-			sum += a[i + r];
+		for(int i = -radius; i <= radius; i++) {
+			a[i + radius] = exp(-1.0 * (i * i) / (2 * radius * radius));
+			sum += a[i + radius];
 		}
 
 		for(int i = 0; i < n; i++){
@@ -91,9 +93,9 @@ public:
 
 		
 		ch = cudaCreateChannelDesc<uchar4>();
-		CSC(cudaMallocArray(&arr, &ch, w, h));
-		CSC(cudaMemcpyToArray(arr, 0, 0, data, sizeof(uchar4) * h * w, cudaMemcpyHostToDevice));
-
+		CSC(cudaMallocArray(&arr, &ch, weight, hieght));
+		CSC(cudaMemcpyToArray(arr, 0, 0, data, sizeof(*data) * hieght * weight, cudaMemcpyHostToDevice));
+ 
 		tex.addressMode[0] = cudaAddressModeClamp;
 		tex.addressMode[1] = cudaAddressModeClamp;
 		tex.channelDesc = ch;
@@ -101,21 +103,21 @@ public:
 		tex.normalized = false;
 
 		CSC(cudaBindTextureToArray(tex, arr, ch));
-		CSC(cudaMalloc(&dev_data, sizeof(uchar4) * w * h));
+		CSC(cudaMalloc(&dev_data, sizeof(*dev_data) * weight * hieght));
 
 	} 
+ 
+	void run_kernel() {
 
-	void run_kernel(int r) {
-		kernel <<<dim3(8,16), dim3(8,32) >>> (dev_data, w, h, r, dev_a, false);
+		kernel <<<dim3(8,16), dim3(8,32) >>> (dev_data, weight, hieght, radius, dev_a, false);
 
 		CSC(cudaUnbindTexture(tex));
-		CSC(cudaMemcpyToArray(arr, 0, 0, dev_data, sizeof(uchar4) * w * h, cudaMemcpyDeviceToDevice));
+		CSC(cudaMemcpyToArray(arr, 0, 0, dev_data, sizeof(uchar4) * weight * hieght, cudaMemcpyDeviceToDevice));
 		CSC(cudaBindTextureToArray(tex, arr, ch));
 
-		kernel <<< dim3(8,16), dim3(16,32) >>> (dev_data, w, h, r, dev_a, true);
+		kernel <<< dim3(8,16), dim3(16,32) >>> (dev_data, weight, hieght, radius, dev_a, true);
 
-
-		CSC(cudaMemcpy(data, dev_data, sizeof(uchar4) * w * h, cudaMemcpyDeviceToHost));
+		CSC(cudaMemcpy(data, dev_data, sizeof(uchar4) * weight * hieght, cudaMemcpyDeviceToHost));
 
 	}
 
@@ -130,41 +132,17 @@ public:
 	}
 };
 
-
 int main() {
-	int r, w, h;
 	
-	char input_name[256];
-	char output_name[256];
+	IOHelper<uchar4> helper = IOHelper<uchar4>();
 
-
-	scanf("%s", input_name);
-	scanf("%s", output_name);
-	scanf("%d", &r);
-
-	FILE *in = fopen(input_name, "rb");
-
-	fread(&w, sizeof(int), 1, in);
-	fread(&h, sizeof(int), 1, in);
-
-	uchar4 *data = (uchar4 *)malloc(sizeof(uchar4) * w * h);
-	
-
-	fread(data, sizeof(uchar4), w * h, in);
-	fclose(in);
-
-	CUGaussianBlur image = CUGaussianBlur(r, w, h, data);
-	if(r != 0){
+	CUGaussianBlur image = CUGaussianBlur(&helper);
+	if(helper.GetRadius() != 0){
 		
-		image.run_kernel(r);
+		image.run_kernel();
 	}
 
-	FILE *out = fopen(output_name, "wb");
-	fwrite(&w, sizeof(int), 1, out);
-	fwrite(&h, sizeof(int), 1, out);
-	fwrite(image.data, sizeof(uchar4), w * h, out);
-
-	fclose(out);
+	helper.WriteData(image.data);
 
 	return 0;
 }
