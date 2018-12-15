@@ -5,4 +5,4 @@ make all
 
 python conv.py outtyp.data out.bmp
 
-make clean
+make cleaner
